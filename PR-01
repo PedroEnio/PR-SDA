@@ -1,0 +1,117 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def tratar_dados_ghi(caminho_arquivo):
+    """
+    Carrega o CSV, faz o tratamento dos formatos de data,
+    limpa os caracteres numéricos e filtra apenas as colunas de GHI e IRRAD_POA.
+    """
+    df = pd.read_csv(caminho_arquivo, sep=';', dtype=str)
+
+    # Ajuste do primeiro valor do timestamp
+    df.at[0, 'E3TimeStamp'] = str(df.at[0, 'E3TimeStamp']) + " 00:00:00"
+
+    # Busca colunas GHI e IRRAD_POA
+    colunas_ghi = [col for col in df.columns if "GHI" in col.upper()]
+    colunas_poa = [col for col in df.columns if "IRRAD_POA" in col.upper()]
+    
+    colunas_finais = ['E3TimeStamp'] + colunas_ghi + colunas_poa
+
+    # Cria o DataFrame filtrado com caminhos únicos (usando set para não duplicar se houver sobreposição)
+    colunas_finais = list(dict.fromkeys(colunas_finais))
+    df_filtrado = df[colunas_finais].copy()
+
+    # Converte a data
+    df_filtrado['E3TimeStamp'] = pd.to_datetime(df_filtrado['E3TimeStamp'], dayfirst=True)
+
+    # Limpeza e conversão de todas as colunas de irradiância para numérico
+    for col in colunas_ghi + colunas_poa:
+        df_filtrado[col] = df_filtrado[col].astype(str).str.strip()
+        df_filtrado[col] = df_filtrado[col].str.replace(',', '.')
+        df_filtrado[col] = pd.to_numeric(df_filtrado[col], errors='coerce')
+
+    df_filtrado.set_index('E3TimeStamp', inplace=True)
+    return df_filtrado
+
+
+def validar_dia_poa(df_tratado):
+    """
+    Valida se o dia é válido baseado nas colunas IRRAD_POA e GHI.
+    Critérios:
+    1. Pelo menos uma coluna POA deve ter valores >= 600 por 12 medidas consecutivas.
+    2. O acumulado (soma) de IRRAD_POA deve ser > 3000, considerando apenas momentos onde GHI > 50.
+    """
+    colunas_poa = [col for col in df_tratado.columns if "IRRAD_POA" in col.upper()]
+    colunas_ghi = [col for col in df_tratado.columns if "GHI" in col.upper()]
+    
+    if not colunas_poa or not colunas_ghi:
+        print("⚠️ Colunas 'IRRAD_POA' ou 'GHI' ausentes para validação.")
+        return False
+
+    # Criamos uma média das GHIs do momento para servir de filtro de linha
+    ghi_media = df_tratado[colunas_ghi].mean(axis=1)
+    
+    # Filtramos o DataFrame: mantemos os dados originais de POA apenas onde GHI_média > 50
+    # Onde GHI <= 50, o valor de POA é considerado 0 para a soma do acumulado
+    df_filtrado_ghi = df_tratado[colunas_poa].where(ghi_media > 50, 0)
+
+    dia_valido = False
+    
+    print("\n--- Analisando Critérios de Validação ---")
+    for col in colunas_poa:
+        # --- CRITÉRIO 1: 12 Consecutivos >= 600 ---
+        condicao_minima = df_tratado[col] >= 600
+        consecutivos = condicao_minima.rolling(window=12).sum()
+        atingiu_consecutivos = (consecutivos == 12).any()
+        
+        # --- CRITÉRIO 2: Acumulado > 3000 (onde GHI > 50) ---
+        # Buscamos a soma na série que filtramos anteriormente
+        acumulado_poa = df_filtrado_ghi[col].sum()
+        atingiu_acumulado = acumulado_poa > 3000
+        
+        print(f"\nSensor: {col}")
+        print(f"  > 12 medidas seguidas >= 600? {'✅ Sim' if atingiu_consecutivos else '❌ Não'}")
+        print(f"  > Acumulado (GHI > 50): {acumulado_poa:.2f} W/m² (Meta > 3000)? {'✅ Sim' if atingiu_acumulado else '❌ Não'}")
+        
+        # O dia só é válido para este sensor se passar nos DOIS critérios simultaneamente
+        if atingiu_consecutivos and atingiu_acumulado:
+            print(f"  🎯 Sensor {col} validou o dia!")
+            dia_valido = True
+
+    return dia_valido
+
+
+def plotar_grafico_ghi(df_tratado):
+    """
+    Gera o gráfico focando nas colunas de GHI.
+    """
+    colunas_ghi = [col for col in df_tratado.columns if "GHI" in col.upper()]
+    
+    plt.figure(figsize=(12, 7))
+
+    for coluna in colunas_ghi:
+        plt.plot(df_tratado.index, df_tratado[coluna], label=coluna, alpha=0.8)
+
+    plt.title('Valores de GHI ao Longo do Tempo - Sol do Agreste', fontsize=14, fontweight='bold')
+    plt.xlabel('Tempo', fontsize=12)
+    plt.ylabel('Irradiância (W/m²)', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=4, fontsize=9)
+    plt.tight_layout()
+    plt.show()
+
+
+# --- EXECUÇÃO ---
+if __name__ == "__main__":
+    caminho = "C:\\Users\\PedroMedeiros\\OneDrive - Simm\\Documentos\\04 - PROJETOS\\102 - SOL DO AGRESTE\\00 - PR\\AnalogReport_20260714 - Sem Correntes (2).csv"
+    
+    # 1. Trata os dados (Traz GHI e IRRAD_POA juntos)
+    dados_tratados = tratar_dados_ghi(caminho)
+    
+    # 2. Avalia se o dia foi válido
+    eh_valido = validar_dia_poa(dados_tratados)
+    
+    print(f"\nResultado Final: O DIA É VÁLIDO? -> {eh_valido}\n")
+    
+    # 3. Plota o gráfico de GHI
+    plotar_grafico_ghi(dados_tratados)
